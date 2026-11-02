@@ -64,6 +64,11 @@
 
 源码是单个自包含的 ScriptUI 面板文件 [`Egroup.jsx`](Egroup.jsx)，图标全部为矢量绘制，不依赖外部图片。
 
+## Contributors / 贡献者
+
+- [KOGGUA-EDIT](https://github.com/KOGGUA-EDIT)
+- [DeepSeek](https://github.com/deepseek-kg1)
+
 ## License
 
 [MIT](LICENSE) © 2026 KOGGUA-EDIT
