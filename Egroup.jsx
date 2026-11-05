@@ -1,10 +1,10 @@
 /*
- * Egroup 1.0.0 — a layer-grouping panel for EffectCraft.
+ * Egroup 1.1.0 — a layer-grouping panel for EffectCraft.
  * Independent implementation. No code from Free Compose is used.
  * MIT licensed; see the repository README.
  */
 (function (thisObj) {
-    var ECG_VERSION = "1.0.0";
+    var ECG_VERSION = "1.1.0";
     var PANEL_W = 172;
     var PANEL_H = 40;
     var IDS = ["add", "remove", "join", "leave", "show", "hide", "select", "settings"];
@@ -32,16 +32,16 @@
             ok: "OK",
             cancel: "Cancel",
             newGroup: "New Group",
-            groupHint: "Name (leave blank to keep the Group: N prefix)",
+            groupHint: "Name (leave blank to keep the #N prefix)",
             create: "Create",
             needComp: "Open a composition first.",
-            selectGroupNull: "Select the layers and one Group Null (Group: N).",
+            selectGroupNull: "Select the layers and one group Null (#N).",
             noData: "That Null has no Egroup data.",
             selectAdd: "Select one or more layers to add.",
             selectRemove: "Select group members to remove.",
             selectToGroup: "Select one or more layers to group.",
             selectInside: "Select a layer inside a group first.",
-            disabledTip: "Select a Group Null (Group: N) with layers to enable.",
+            disabledTip: "Select a group Null (#N) with layers to enable.",
             tipAdd: "Make Group (selected layers)",
             tipRemove: "Release Group",
             tipJoin: "Add layers to group (select layers + group Null)",
@@ -61,16 +61,16 @@
             ok: "确定",
             cancel: "取消",
             newGroup: "新建组",
-            groupHint: "组名（留空则只用 Group: N 前缀）",
+            groupHint: "组名（留空则只用 #N 前缀）",
             create: "创建",
             needComp: "请先打开一个合成。",
-            selectGroupNull: "请选中要操作的图层，以及一个组空对象（Group: N）。",
+            selectGroupNull: "请选中要操作的图层，以及一个组空对象（#N）。",
             noData: "这个空对象里没有 Egroup 数据。",
             selectAdd: "请选择要加入的一个或多个图层。",
             selectRemove: "请选择要移出的组内图层。",
             selectToGroup: "请选择一个或多个要建组的图层。",
             selectInside: "请先选中组内的一个图层。",
-            disabledTip: "选中组空对象（Group: N）和图层后可用。",
+            disabledTip: "选中组空对象（#N）和图层后可用。",
             tipAdd: "创建组（使用选中图层）",
             tipRemove: "释放组",
             tipJoin: "加入组（选中图层 + 组空对象）",
@@ -458,6 +458,10 @@
         var g = canvas.graphics;
         var W = canvas.size.width, H = canvas.size.height;
         if (!(W > 2) || !(H > 2)) { W = PANEL_W; H = PANEL_H; }
+        try {
+            var c = app.project.activeItem;
+            if (c && c instanceof CompItem) migrateGroupNames(c);
+        } catch (eMig) {}
         refreshGroupActions();
         buildLayout(W, H);
         fillRect(g, 0, 0, W, H, [0.11, 0.11, 0.12, 1]);
@@ -481,7 +485,9 @@
         return out;
     }
     function groupNo(name) {
-        var m = /^Group:\s*(\d+)/.exec(String(name));
+        // New groups use "#N"; "Group: N" is kept readable for projects made
+        // with Egroup 1.0.x and older test builds.
+        var m = /^(?:Group:\s*|#\s*)(\d+)/.exec(String(name));
         return m ? parseInt(m[1], 10) : 0;
     }
     function groupComment(nul) {
@@ -545,6 +551,78 @@
             if (g) return g;
         }
         return null;
+    }
+
+    // ---------------------------------------------------------------- group visibility
+    // A group Null's eye (layer.enabled) drives its members: switching the Null
+    // off hides every member; switching it back on restores the member states
+    // that were in effect before the Null was switched off. ScriptUI has no
+    // layer-change event, so a lightweight repeating task polls open project.
+    var migratedCompId = 0;
+
+    function migrateGroupNames(c) {
+        if (!c || migratedCompId === c.id) return;
+        migratedCompId = c.id;
+        for (var i = 1; i <= c.layers.length; i++) {
+            var L = c.layer(i);
+            if (!groupComment(L)) continue;
+            var m = /^Group:\s*(\d+)/.exec(String(L.name || ""));
+            if (!m) continue;
+            var suffix = String(L.name).replace(/^Group:\s*\d+\s*\|?\s*/, "");
+            L.name = "#" + m[1] + (suffix ? " | " + suffix : "");
+        }
+    }
+
+    function visibilityState() {
+        if (!$.global.ecgVisibilityState) $.global.ecgVisibilityState = {};
+        return $.global.ecgVisibilityState;
+    }
+
+    function syncGroupVisibility() {
+        var c = app.project.activeItem;
+        if (!c || !(c instanceof CompItem)) return;
+        var state = visibilityState();
+        var seen = {};
+        for (var i = 1; i <= c.layers.length; i++) {
+            var nul = c.layer(i);
+            var n = groupNo(nul.name);
+            var g = groupComment(nul);
+            if (!n || !g) continue;
+            seen[nul.id] = true;
+            var members = groupMembers(c, { n: g.n, nul: nul, ids: g.ids });
+            var memberIds = {};
+            for (var j = 0; j < members.length; j++) memberIds[members[j].id] = true;
+            var rec = state[nul.id];
+            if (nul.enabled === false) {
+                if (!rec) rec = state[nul.id] = {};
+                for (var j2 = 0; j2 < members.length; j2++) {
+                    var L = members[j2];
+                    if (!rec.hasOwnProperty(L.id)) rec[L.id] = !!L.enabled;
+                    if (L.enabled) L.enabled = false;
+                }
+            } else if (nul.enabled === true && rec) {
+                for (var id in rec) {
+                    if (!rec.hasOwnProperty(id)) continue;
+                    if (!memberIds[id]) { delete rec[id]; continue; }
+                    var M = layerById(c, parseInt(id, 10));
+                    if (M) M.enabled = rec[id];
+                }
+                delete state[nul.id];
+            }
+        }
+        for (var key in state) {
+            if (!seen[key]) delete state[key];
+        }
+    }
+
+    function startVisibilityPoll() {
+        try {
+            if ($.global.ecgVisibilityTask) {
+                try { app.cancelTask($.global.ecgVisibilityTask); } catch (eC) {}
+            }
+            $.global.ecgVisibilitySync = syncGroupVisibility;
+            $.global.ecgVisibilityTask = app.scheduleTask("ecgVisibilitySync()", 250, true);
+        } catch (ePoll) {}
     }
 
     function selectedGroupNull(c) {
@@ -691,14 +769,14 @@
         w.show();
     }
 
-    // Keep the "Group: N" prefix that groupNo() relies on, but let the rest be
-    // any user-visible label.
+    // New groups are named "#N" (plus an optional user label). "Group: N" is
+    // still accepted so projects created with Egroup 1.0.x keep working.
     function groupNameFromInput(raw, n) {
         var s = String(raw === undefined || raw === null ? "" : raw).replace(/^\s+|\s+$/g, "");
-        if (s && /^Group:\s*\d+/.test(s)) {
-            s = s.replace(/^Group:\s*\d+\s*\|?\s*/, "");
+        if (s && /^(?:Group:\s*\d+|#\s*\d+)/.test(s)) {
+            s = s.replace(/^(?:Group:\s*\d+|#\s*\d+)\s*\|?\s*/, "");
         }
-        return "Group: " + n + (s ? " | " + s : "");
+        return "#" + n + (s ? " | " + s : "");
     }
 
     function promptGroupName(n) {
@@ -707,7 +785,7 @@
         w.alignChildren = ["left", "top"];
         w.margins = 16;
         w.add("statictext", undefined, T("groupHint"));
-        var edit = w.add("edittext", undefined, "Group: " + n);
+        var edit = w.add("edittext", undefined, "#" + n);
         edit.characters = 32;
         var row = w.add("group");
         row.alignment = ["right", "top"];
@@ -734,7 +812,7 @@
         members.sort(function (a, b) { return a.index - b.index; });
         var top = members[0];
         var n = nextNo(c);
-        var groupName = "Group: " + n;
+        var groupName = "#" + n;
         if (askGroupName) {
             var prompted = promptGroupName(n);
             if (prompted === null) return;
@@ -876,5 +954,6 @@
     }
     win.layout.layout(true);
     try { win.onResizing = function () { redraw(); }; win.onResize = function () { redraw(); }; } catch (e3) {}
+    startVisibilityPoll();
     redraw();
 })(this);
