@@ -1,10 +1,10 @@
 /*
- * Egroup 1.1.0 — a layer-grouping panel for EffectCraft.
+ * Egroup 1.3.0 — a layer-grouping panel for EffectCraft.
  * Independent implementation. No code from Free Compose is used.
  * MIT licensed; see the repository README.
  */
 (function (thisObj) {
-    var ECG_VERSION = "1.1.0";
+    var ECG_VERSION = "1.4.0";
     var PANEL_W = 172;
     var PANEL_H = 40;
     var IDS = ["add", "remove", "join", "leave", "show", "hide", "select", "settings"];
@@ -21,6 +21,13 @@
         if (_lang === "zh" || _lang === "en") LANG_MODE = _lang;
     } catch (eLang) {}
 
+    var LINK_MODE = "off";
+    try {
+        var _link = app.settings.getSetting("ECGroup", "linkMode");
+        if (_link === "expr" || _link === "parent") LINK_MODE = _link;
+    } catch (eLink) {}
+    var LINK_MARK = "/*EgroupLink*/";
+
     var STR = {
         en: {
             settingsTitle: "Egroup Settings",
@@ -29,6 +36,10 @@
             follow: "Follow system",
             chinese: "中文",
             english: "English",
+            linkMode: "Transform link",
+            linkOff: "No transform link",
+            linkExpr: "Expression link (keeps keyframes)",
+            linkParent: "Direct parent link (moves with group)",
             ok: "OK",
             cancel: "Cancel",
             newGroup: "New Group",
@@ -58,6 +69,10 @@
             follow: "跟随系统",
             chinese: "中文",
             english: "English",
+            linkMode: "变换连接",
+            linkOff: "不进行变换连接",
+            linkExpr: "通过表达式连接（保留关键帧）",
+            linkParent: "直接连接（跟随组移动）",
             ok: "确定",
             cancel: "取消",
             newGroup: "新建组",
@@ -578,16 +593,33 @@
         return $.global.ecgVisibilityState;
     }
 
+    function shyTouched() {
+        if (!$.global.ecgShyTouched) $.global.ecgShyTouched = {};
+        return $.global.ecgShyTouched;
+    }
+
+    function ensureCompShy(c) {
+        // The composition-level "Enables Shy" switch is separate from each
+        // layer's shy icon. Group members are marked shy, so a group is not
+        // really tidy until this master switch is on.
+        try {
+            if (c && c.hideShyLayers !== true) c.hideShyLayers = true;
+        } catch (eShy) {}
+    }
+
     function syncGroupVisibility() {
         var c = app.project.activeItem;
         if (!c || !(c instanceof CompItem)) return;
+        try { cleanupOrphanLinks(c); } catch (eClean) {}
         var state = visibilityState();
         var seen = {};
+        var hasGroup = false;
         for (var i = 1; i <= c.layers.length; i++) {
             var nul = c.layer(i);
             var n = groupNo(nul.name);
             var g = groupComment(nul);
             if (!n || !g) continue;
+            hasGroup = true;
             seen[nul.id] = true;
             var members = groupMembers(c, { n: g.n, nul: nul, ids: g.ids });
             var memberIds = {};
@@ -613,6 +645,306 @@
         for (var key in state) {
             if (!seen[key]) delete state[key];
         }
+        if (hasGroup) {
+            var touched = shyTouched();
+            if (!touched[c.id]) {
+                ensureCompShy(c);
+                touched[c.id] = true;
+            }
+        }
+        try { syncGroupEffects(c); } catch (eFx) {}
+    }
+
+    // ---------------------------------------------------------------- group effects
+    // Effects on the group Null are mirrored onto each member layer. The copies
+    // are ordinary effects, updated four times a second, so the member's own
+    // transform/keyframes and effect stack are not modified except for the
+    // "[ECG ...]" copies. A group Null is a control layer, not a render layer,
+    // so this is how its effects become visible.
+    function isEcgEffect(e) {
+        return /^\[ECG\b/.test(String((e && e.name) || ""));
+    }
+
+    function ecgEffects(layer) {
+        var out = [];
+        try {
+            var fx = layer.property("Effects");
+            for (var i = 1; i <= fx.numProperties; i++) {
+                var e = fx.property(i);
+                if (isEcgEffect(e)) out.push(e);
+            }
+        } catch (e1) {}
+        return out;
+    }
+
+    function plainEffects(layer) {
+        var out = [];
+        try {
+            var fx = layer.property("Effects");
+            for (var i = 1; i <= fx.numProperties; i++) {
+                var e = fx.property(i);
+                if (!isEcgEffect(e)) out.push(e);
+            }
+        } catch (e2) {}
+        return out;
+    }
+
+    function effectCopyName(n, src) {
+        return "[ECG #" + n + "] " + String(src.name || src.matchName || "Effect");
+    }
+
+    function removeEcgEffects(layer) {
+        try {
+            var fx = layer.property("Effects");
+            for (var i = fx.numProperties; i >= 1; i--) {
+                if (isEcgEffect(fx.property(i))) fx.property(i).remove();
+            }
+        } catch (e3) {}
+    }
+
+    function updateEffectCopy(dst, src) {
+        try { dst.enabled = !!src.enabled; } catch (e0) {}
+        var n = Math.min(dst.numProperties, src.numProperties);
+        for (var i = 1; i <= n; i++) {
+            try {
+                var dp = dst.property(i), sp = src.property(i);
+                if (dp && sp) dp.setValue(sp.value);
+            } catch (e4) {}
+        }
+    }
+
+    function addEffectCopy(layer, src, copyName) {
+        try {
+            var dst = layer.property("Effects").addProperty(src.matchName);
+            dst.name = copyName;
+            updateEffectCopy(dst, src);
+            return dst;
+        } catch (e5) { return null; }
+    }
+
+    function syncMemberEffects(layer, n, srcEffects) {
+        var copies = ecgEffects(layer);
+        var rebuild = copies.length !== srcEffects.length;
+        if (!rebuild) {
+            for (var i = 0; i < srcEffects.length; i++) {
+                if (String(copies[i].name) !== effectCopyName(n, srcEffects[i])) { rebuild = true; break; }
+            }
+        }
+        if (rebuild) {
+            removeEcgEffects(layer);
+            for (var j = 0; j < srcEffects.length; j++) addEffectCopy(layer, srcEffects[j], effectCopyName(n, srcEffects[j]));
+        } else {
+            for (var k = 0; k < srcEffects.length; k++) updateEffectCopy(copies[k], srcEffects[k]);
+        }
+    }
+
+    function syncGroupEffects(c) {
+        if (!c || !(c instanceof CompItem)) return;
+        var groupNul = {}, memberGroup = {};
+        for (var i = 1; i <= c.layers.length; i++) {
+            var L = c.layer(i);
+            var d = groupComment(L);
+            if (!d || !groupNo(L.name)) continue;
+            groupNul[d.n] = L;
+            var members = groupMembers(c, { n: d.n, nul: L, ids: d.ids });
+            for (var j = 0; j < members.length; j++) {
+                if (members[j].id !== L.id) memberGroup[members[j].id] = d.n;
+            }
+        }
+        for (var k = 1; k <= c.layers.length; k++) {
+            var M = c.layer(k);
+            if (groupComment(M)) continue;
+            var gn = memberGroup[M.id];
+            var nul = gn ? groupNul[gn] : null;
+            if (!nul) { removeEcgEffects(M); continue; }
+            syncMemberEffects(M, gn, plainEffects(nul));
+        }
+    }
+
+    // ---------------------------------------------------------------- transform links
+    // "off" leaves the members alone. "parent" makes each member a child of the
+    // group Null (EffectCraft compensates the position, so the layer does not
+    // jump). "expr" writes a marked expression on position/scale/rotation; the
+    // baseline is captured as a literal, so "value" keeps the layer's own
+    // keyframes and the expression only adds the group's delta.
+    function linkParents() {
+        if (!$.global.ecgLinkParents) $.global.ecgLinkParents = {};
+        return $.global.ecgLinkParents;
+    }
+
+    function saveLinkMode(v) {
+        try { app.settings.saveSetting("ECGroup", "linkMode", v); } catch (e) {}
+    }
+
+    function isOurExpr(s) {
+        return String(s || "").indexOf(LINK_MARK) === 0;
+    }
+
+    function linkProperties(L) {
+        return [L.transform.position, L.transform.scale, L.transform.rotation];
+    }
+
+    function clearLinkExpressions(L) {
+        var props = linkProperties(L);
+        for (var i = 0; i < props.length; i++) {
+            try {
+                if (isOurExpr(props[i].expression)) props[i].expression = "";
+            } catch (e) {}
+        }
+    }
+
+    function exprGroupName(s) {
+        // Extract the group layer name from our position expression. Names with
+        // backslashes/quotes are escaped by exprName(), so decode them here.
+        var m = /var g=thisComp\.layer\("((?:\\.|[^"\\])*)"\)/.exec(String(s || ""));
+        if (!m) return "";
+        return m[1].replace(/\\([\\"])/g, "$1");
+    }
+
+    function cleanupOrphanLinks(c) {
+        // If the group Null is deleted directly in the timeline (instead of
+        // using Release), the expression's thisComp.layer(name) target is gone.
+        // Remove our expressions and stale parent records so the member does not
+        // keep throwing "layer not found" errors.
+        var changed = false;
+        var map = linkParents();
+        for (var i = 1; i <= c.layers.length; i++) {
+            var L = c.layer(i);
+            var props = linkProperties(L), j;
+            var ours = false, orphan = false;
+            for (j = 0; j < props.length; j++) {
+                var s = "";
+                try { s = String(props[j].expression || ""); } catch (eS) {}
+                if (!isOurExpr(s)) continue;
+                ours = true;
+                var nm = exprGroupName(s), g = null;
+                if (nm) { try { g = c.layer(nm); } catch (eG) {} }
+                if (!g || !groupComment(g)) { orphan = true; break; }
+            }
+            if (!ours || !orphan) continue;
+            clearLinkExpressions(L);
+            if (map.hasOwnProperty(L.id)) delete map[L.id];
+            changed = true;
+        }
+        return changed;
+    }
+
+    function parentIdOf(L) {
+        try { var p = L.parent; return p ? p.id : 0; } catch (e) { return 0; }
+    }
+
+    function restoreOriginalParent(c, L) {
+        var map = linkParents();
+        if (!map.hasOwnProperty(L.id)) return;
+        var id = map[L.id];
+        delete map[L.id];
+        try { L.parent = id ? layerById(c, id) : null; } catch (e) {}
+    }
+
+    function unlinkMember(c, L) {
+        if (!L) return;
+        clearLinkExpressions(L);
+        restoreOriginalParent(c, L);
+    }
+
+    function exprNumber(v) {
+        var n = Number(v);
+        if (!isFinite(n)) n = 0;
+        return String(Math.round(n * 10000) / 10000);
+    }
+
+    function exprArray(a, count) {
+        var out = [], i;
+        for (i = 0; i < count; i++) {
+            var v = (a && a.length > i) ? a[i] : (i === 2 ? 100 : 0);
+            out.push(exprNumber(v));
+        }
+        return "[" + out.join(",") + "]";
+    }
+
+    function exprName(s) {
+        return String(s || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    }
+
+    function detachForExpression(c, L, nul) {
+        // Only the group's own Null conflicts with the expression: keeping it
+        // would move the member twice. An unrelated parent is a normal
+        // hierarchy and is left alone.
+        if (!nul || L.parent !== nul) return;
+        var map = linkParents();
+        if (!map.hasOwnProperty(L.id)) {
+            var pid = parentIdOf(L);
+            if (pid) map[L.id] = pid;
+        }
+        try { L.parent = null; } catch (eD) {}
+    }
+
+    function applyLinkToMember(c, L, nul) {
+        if (!L || !nul || L.id === nul.id) return;
+        if (LINK_MODE === "off") {
+            unlinkMember(c, L);
+            return;
+        }
+        if (LINK_MODE === "parent") {
+            clearLinkExpressions(L);
+            var map = linkParents();
+            if (!map.hasOwnProperty(L.id)) map[L.id] = parentIdOf(L);
+            try { L.parent = nul; } catch (eP) {}
+            return;
+        }
+
+        var props = linkProperties(L), i;
+        for (i = 0; i < props.length; i++) {
+            var old = "";
+            try { old = String(props[i].expression || ""); } catch (eOld) {}
+            if (old && !isOurExpr(old)) return; // do not fight a user expression
+        }
+
+        // Expression mode: detach any parent while active, so the group's
+        // world-space delta is not applied twice. The original parent is kept
+        // in ecgLinkParents and restored when the link is turned off.
+        detachForExpression(c, L, nul);
+        clearLinkExpressions(L);
+
+        var nm = exprName(nul.name);
+        var is3 = !!L.threeDLayer;
+        try {
+            var pn = props[0], sn = props[1], rn = props[2];
+            var pb = exprArray(nul.transform.position.value, is3 ? 3 : 2);
+            pn.expression = LINK_MARK + 'var g=thisComp.layer("' + nm + '");var b=' +
+                pb + ';g?value+(g.transform.position-b):value;';
+
+            var comps = is3 ? 3 : 2;
+            var sb = exprArray(nul.transform.scale.value, comps), parts = [];
+            for (i = 0; i < comps; i++) {
+                parts.push("value[" + i + "]*g.transform.scale[" + i + "]/b[" + i + "]");
+            }
+            sn.expression = LINK_MARK + 'var g=thisComp.layer("' + nm + '");var b=' +
+                sb + ";g?[" + parts.join(",") + "]:value;";
+
+            var rb = exprNumber(nul.transform.rotation.value);
+            rn.expression = LINK_MARK + 'var g=thisComp.layer("' + nm + '");g?value+(g.transform.rotation-' +
+                rb + "):value;";
+        } catch (eApply) {}
+    }
+
+    function applyLinkToGroup(c, g) {
+        if (!c || !g || !g.nul) return;
+        var members = groupMembers(c, g);
+        for (var i = 0; i < members.length; i++) applyLinkToMember(c, members[i], g.nul);
+    }
+
+    function applyLinkModeAll() {
+        try {
+            var c = app.project.activeItem;
+            if (!c || !(c instanceof CompItem)) return;
+            for (var i = 1; i <= c.layers.length; i++) {
+                var L = c.layer(i);
+                var d = groupComment(L);
+                if (!d || !groupNo(L.name)) continue;
+                applyLinkToGroup(c, { n: d.n, nul: L, ids: d.ids });
+            }
+        } catch (eAll) {}
     }
 
     function startVisibilityPoll() {
@@ -706,6 +1038,7 @@
         nul.comment = "ECG:" + g.n + "|" + ids.join(",");
         // Membership is stored in the Null's comment; layers keep their stack
         // position, so joining does not move them under the Null.
+        applyLinkToGroup(c, { n: g.n, nul: nul, ids: ids });
         app.endUndoGroup();
         refreshGroupActions();
         redraw();
@@ -726,6 +1059,10 @@
         var kept = [];
         for (i = 0; i < g.ids.length; i++) if (!hasId(remove, g.ids[i])) kept.push(g.ids[i]);
         app.beginUndoGroup("Egroup: Remove Layers " + g.n);
+        for (i = 0; i < remove.length; i++) {
+            var removed = layerById(c, remove[i]);
+            if (removed) unlinkMember(c, removed);
+        }
         nul.comment = "ECG:" + g.n + "|" + kept.join(",");
         app.endUndoGroup();
         refreshGroupActions();
@@ -751,10 +1088,23 @@
         lrow.add("statictext", undefined, T("language") + ":");
         var dd = lrow.add("dropdownlist", undefined, [T("follow"), T("chinese"), T("english")]);
         dd.selection = (LANG_MODE === "zh") ? 1 : (LANG_MODE === "en") ? 2 : 0;
+
+        var linkPanel = w.add("panel", undefined, T("linkMode"));
+        linkPanel.orientation = "column";
+        linkPanel.alignChildren = ["left", "top"];
+        linkPanel.margins = 10;
+        var rOff = linkPanel.add("radiobutton", undefined, T("linkOff"));
+        var rExpr = linkPanel.add("radiobutton", undefined, T("linkExpr"));
+        var rParent = linkPanel.add("radiobutton", undefined, T("linkParent"));
+        rOff.value = (LINK_MODE === "off");
+        rExpr.value = (LINK_MODE === "expr");
+        rParent.value = (LINK_MODE === "parent");
+
         var row = w.add("group");
         row.alignment = ["right", "top"];
         var ok = row.add("button", undefined, T("ok"));
         var cancel = row.add("button", undefined, T("cancel"));
+        var linkChanged = false;
         ok.onClick = function () {
             askGroupName = !!cb.value;
             saveAskName(askGroupName);
@@ -762,11 +1112,21 @@
             LANG_MODE = (idx === 1) ? "zh" : (idx === 2) ? "en" : "auto";
             saveLang(LANG_MODE);
             UI_LANG = resolveLang();
+            var newLink = rOff.value ? "off" : (rExpr.value ? "expr" : "parent");
+            if (newLink !== LINK_MODE) {
+                LINK_MODE = newLink;
+                saveLinkMode(LINK_MODE);
+                linkChanged = true;
+            }
             w.close(1);
         };
         cancel.onClick = function () { w.close(0); };
         w.center();
-        w.show();
+        var accepted = w.show();
+        if (accepted === 1 && linkChanged) {
+            applyLinkModeAll();
+            redraw();
+        }
     }
 
     // New groups are named "#N" (plus an optional user label). "Group: N" is
@@ -827,7 +1187,10 @@
         nul.comment = "ECG:" + n + "|" + ids.join(",");
         nul.label = 9;
         nul.shy = false;
+        ensureCompShy(c);
+        shyTouched()[c.id] = true;
         stripFromOtherGroups(c, ids, nul.id);
+        applyLinkToGroup(c, { n: n, nul: nul, ids: ids });
         app.endUndoGroup();
         redraw();
     }
@@ -837,6 +1200,8 @@
         var g = targetGroup(c);
         if (!g) { alert(T("selectInside")); return; }
         app.beginUndoGroup("Egroup: Release Group " + g.n);
+        var members = groupMembers(c, g);
+        for (var i = 0; i < members.length; i++) unlinkMember(c, members[i]);
         g.nul.remove();
         app.endUndoGroup();
         redraw();
@@ -957,3 +1322,4 @@
     startVisibilityPoll();
     redraw();
 })(this);
+
