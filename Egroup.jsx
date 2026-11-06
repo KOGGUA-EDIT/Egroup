@@ -4,7 +4,7 @@
  * MIT licensed; see the repository README.
  */
 (function (thisObj) {
-    var ECG_VERSION = "1.4.0";
+    var ECG_VERSION = "1.4.1";
     var PANEL_W = 172;
     var PANEL_H = 40;
     var IDS = ["add", "remove", "join", "leave", "show", "hide", "select", "settings"];
@@ -43,16 +43,16 @@
             ok: "OK",
             cancel: "Cancel",
             newGroup: "New Group",
-            groupHint: "Name (leave blank to keep the #N prefix)",
+            groupHint: "Name (default #1; edit it to use just #)",
             create: "Create",
             needComp: "Open a composition first.",
-            selectGroupNull: "Select the layers and one group Null (#N).",
+            selectGroupNull: "Select the layers and one group Null (#).",
             noData: "That Null has no Egroup data.",
             selectAdd: "Select one or more layers to add.",
             selectRemove: "Select group members to remove.",
             selectToGroup: "Select one or more layers to group.",
             selectInside: "Select a layer inside a group first.",
-            disabledTip: "Select a group Null (#N) with layers to enable.",
+            disabledTip: "Select a group Null (#) with layers to enable.",
             tipAdd: "Make Group (selected layers)",
             tipRemove: "Release Group",
             tipJoin: "Add layers to group (select layers + group Null)",
@@ -76,16 +76,16 @@
             ok: "确定",
             cancel: "取消",
             newGroup: "新建组",
-            groupHint: "组名（留空则只用 #N 前缀）",
+            groupHint: "组名（默认 #1；改了就用 # 或 # | 标签）",
             create: "创建",
             needComp: "请先打开一个合成。",
-            selectGroupNull: "请选中要操作的图层，以及一个组空对象（#N）。",
+            selectGroupNull: "请选中要操作的图层，以及一个组空对象（#）。",
             noData: "这个空对象里没有 Egroup 数据。",
             selectAdd: "请选择要加入的一个或多个图层。",
             selectRemove: "请选择要移出的组内图层。",
             selectToGroup: "请选择一个或多个要建组的图层。",
             selectInside: "请先选中组内的一个图层。",
-            disabledTip: "选中组空对象（#N）和图层后可用。",
+            disabledTip: "选中组空对象（#）和图层后可用。",
             tipAdd: "创建组（使用选中图层）",
             tipRemove: "释放组",
             tipJoin: "加入组（选中图层 + 组空对象）",
@@ -499,11 +499,31 @@
         for (var i = 0; i < s.length; i++) out.push(s[i]);
         return out;
     }
+    // The visible name is "#" (optionally "# | Label"). A zero-width tag after
+    // the "#" keeps every group's full layer name unique, which matters for
+    // expression links (thisComp.layer(name) must resolve to one group only).
+    var GROUP_TAG_START = String.fromCharCode(0x2060);
+    var GROUP_TAG_ZERO = String.fromCharCode(0x200B);
+    var GROUP_TAG_ONE = String.fromCharCode(0x200C);
+    function groupTag(n) {
+        var bits = "", v = Math.floor(Number(n)) || 1;
+        for (var i = 0; i < 16; i++) bits += ((v >> i) & 1) ? GROUP_TAG_ONE : GROUP_TAG_ZERO;
+        return GROUP_TAG_START + bits + GROUP_TAG_START;
+    }
+    function groupDefaultName(n) {
+        return "#" + n;
+    }
+    function groupNameTag(n) {
+        return groupDefaultName(n) + groupTag(n);
+    }
     function groupNo(name) {
-        // New groups use "#N"; "Group: N" is kept readable for projects made
-        // with Egroup 1.0.x and older test builds.
-        var m = /^(?:Group:\s*|#\s*)(\d+)/.exec(String(name));
-        return m ? parseInt(m[1], 10) : 0;
+        // Groups are named "#" (optionally "# | Label"); older builds used
+        // "#N" and "Group: N". The stable group number lives in the ECG:
+        // comment, not in the visible name.
+        var s = String(name);
+        var m = /^Group:\s*(\d+)/.exec(s);
+        if (m) return parseInt(m[1], 10);
+        return s.charAt(0) === "#" ? 1 : 0;
     }
     function groupComment(nul) {
         var m = /^ECG:(\d+)\|(.*)$/.exec(String((nul && nul.comment) || ""));
@@ -554,8 +574,8 @@
     function nextNo(c) {
         var max = 0;
         for (var i = 1; i <= c.layers.length; i++) {
-            var n = groupNo(c.layer(i).name);
-            if (n > max) max = n;
+            var d = groupComment(c.layer(i));
+            if (d && d.n > max) max = d.n;
         }
         return max + 1;
     }
@@ -579,12 +599,20 @@
         if (!c || migratedCompId === c.id) return;
         migratedCompId = c.id;
         for (var i = 1; i <= c.layers.length; i++) {
-            var L = c.layer(i);
-            if (!groupComment(L)) continue;
-            var m = /^Group:\s*(\d+)/.exec(String(L.name || ""));
-            if (!m) continue;
-            var suffix = String(L.name).replace(/^Group:\s*\d+\s*\|?\s*/, "");
-            L.name = "#" + m[1] + (suffix ? " | " + suffix : "");
+            var L = c.layer(i), d = groupComment(L);
+            if (!d) continue;
+            var name = String(L.name || "");
+            if (name.indexOf(GROUP_TAG_START) >= 0) continue;
+            var m = /^(?:Group:\s*|#\s*)(\d+)\s*\|?\s*/.exec(name);
+            if (m) {
+                var suffix = name.replace(m[0], "");
+                L.name = groupNameTag(d.n) + (suffix ? " | " + suffix : "");
+            } else if (/^#\s*(?:\|\s*.*)?$/.test(name)) {
+                // "1.4.x" groups were plain "#" / "# | Label" before the tag.
+                // A bare "#" keeps the automatic number; a custom label stays "#".
+                var label = name.replace(/^#\s*(?:\|\s*)?/, "");
+                L.name = label ? ("#" + groupTag(d.n) + " | " + label) : groupNameTag(d.n);
+            }
         }
     }
 
@@ -702,62 +730,150 @@
         } catch (e3) {}
     }
 
-    function updateEffectCopy(dst, src) {
-        try { dst.enabled = !!src.enabled; } catch (e0) {}
+    function copyEffectProperties(dst, src, depth) {
+        // Effects such as Cartoonify put most controls inside property groups
+        // (Fill / Edge / Advanced). Setting only the top level copies the effect
+        // name but leaves those groups at their defaults, so walk the tree.
+        if (!dst || !src || depth > 12) return;
         var n = Math.min(dst.numProperties, src.numProperties);
         for (var i = 1; i <= n; i++) {
+            var dp, sp;
+            try { dp = dst.property(i); sp = src.property(i); } catch (eFind) { continue; }
+            if (!dp || !sp) continue;
             try {
-                var dp = dst.property(i), sp = src.property(i);
-                if (dp && sp) dp.setValue(sp.value);
-            } catch (e4) {}
+                if (dp.numProperties > 0 && sp.numProperties > 0) copyEffectProperties(dp, sp, depth + 1);
+                else dp.setValue(sp.value);
+            } catch (eValue) {}
         }
+    }
+
+    function updateEffectCopy(dst, src) {
+        try { dst.enabled = !!src.enabled; } catch (e0) {}
+        copyEffectProperties(dst, src, 0);
     }
 
     function addEffectCopy(layer, src, copyName) {
+        var dst = null;
         try {
-            var dst = layer.property("Effects").addProperty(src.matchName);
+            dst = layer.property("Effects").addProperty(src.matchName);
             dst.name = copyName;
             updateEffectCopy(dst, src);
+            // A copy without the prefix cannot be found/cleaned later. Remove it
+            // instead of leaving an untracked effect on the member layer.
+            if (!isEcgEffect(dst)) {
+                try { dst.remove(); } catch (eR) {}
+                return null;
+            }
             return dst;
-        } catch (e5) { return null; }
+        } catch (e5) {
+            if (dst) { try { dst.remove(); } catch (eR2) {} }
+            return null;
+        }
     }
 
-    function syncMemberEffects(layer, n, srcEffects) {
-        var copies = ecgEffects(layer);
-        var rebuild = copies.length !== srcEffects.length;
-        if (!rebuild) {
-            for (var i = 0; i < srcEffects.length; i++) {
-                if (String(copies[i].name) !== effectCopyName(n, srcEffects[i])) { rebuild = true; break; }
+    function effectCache() {
+        if (!$.global.ecgEffectCache) $.global.ecgEffectCache = {};
+        return $.global.ecgEffectCache;
+    }
+
+    function propertySignature(p) {
+        var parts = [];
+        function walk(prop, depth) {
+            if (!prop || depth > 12) return;
+            var count = 0;
+            try { count = prop.numProperties; } catch (eCount) {}
+            if (count > 0) {
+                for (var i = 1; i <= count; i++) {
+                    var child = null;
+                    try { child = prop.property(i); } catch (eChild) {}
+                    walk(child, depth + 1);
+                }
+            } else {
+                var value = "?";
+                try { value = String(prop.value); } catch (eValue) {}
+                parts.push(value);
             }
         }
+        walk(p, 0);
+        return parts.join("~");
+    }
+
+    function effectsSignature(list) {
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+            var e = list[i];
+            var enabled = true;
+            try { enabled = !!e.enabled; } catch (eEnabled) {}
+            out.push(String(e.matchName) + "@" + (enabled ? "1" : "0") + ":" + propertySignature(e));
+        }
+        return out.join("|");
+    }
+
+    function syncMemberEffects(layer, n, srcEffects, sig) {
+        var copies = ecgEffects(layer);
+        if (sig === undefined || sig === null) sig = effectsSignature(srcEffects);
+        var cache = effectCache();
+        var prev = cache[layer.id];
+        // The signature still has to be built, but avoiding setValue() on every
+        // nested property every tick is what keeps large effect stacks cheap.
+        var sameTypes = copies.length === srcEffects.length;
+        if (sameTypes) {
+            for (var t = 0; t < srcEffects.length; t++) {
+                if (String(copies[t].matchName) !== String(srcEffects[t].matchName)) { sameTypes = false; break; }
+            }
+        }
+        if (prev && prev.sig === sig && sameTypes) return;
+        var rebuild = !sameTypes;
         if (rebuild) {
             removeEcgEffects(layer);
             for (var j = 0; j < srcEffects.length; j++) addEffectCopy(layer, srcEffects[j], effectCopyName(n, srcEffects[j]));
+            // If any add failed, retry the cleanup next tick rather than leaving
+            // a half-populated stack that could be mistaken for a real copy.
+            if (ecgEffects(layer).length !== srcEffects.length) {
+                removeEcgEffects(layer);
+                delete cache[layer.id];
+                return;
+            }
         } else {
             for (var k = 0; k < srcEffects.length; k++) updateEffectCopy(copies[k], srcEffects[k]);
         }
+        cache[layer.id] = { sig: sig };
     }
 
     function syncGroupEffects(c) {
         if (!c || !(c instanceof CompItem)) return;
-        var groupNul = {}, memberGroup = {};
+        var groupNul = {}, groupFx = {}, groupSig = {}, memberGroup = {};
         for (var i = 1; i <= c.layers.length; i++) {
             var L = c.layer(i);
             var d = groupComment(L);
             if (!d || !groupNo(L.name)) continue;
             groupNul[d.n] = L;
+            groupFx[d.n] = plainEffects(L);
+            groupSig[d.n] = effectsSignature(groupFx[d.n]);
             var members = groupMembers(c, { n: d.n, nul: L, ids: d.ids });
             for (var j = 0; j < members.length; j++) {
                 if (members[j].id !== L.id) memberGroup[members[j].id] = d.n;
             }
         }
+        var cache = effectCache();
+        var seen = {};
         for (var k = 1; k <= c.layers.length; k++) {
             var M = c.layer(k);
             if (groupComment(M)) continue;
             var gn = memberGroup[M.id];
             var nul = gn ? groupNul[gn] : null;
-            if (!nul) { removeEcgEffects(M); continue; }
-            syncMemberEffects(M, gn, plainEffects(nul));
+            if (!nul) {
+                removeEcgEffects(M);
+                delete cache[M.id];
+                continue;
+            }
+            seen[M.id] = true;
+            // One bad layer must not prevent the remaining members (or the
+            // cleanup of another group) from being synchronized.
+            try { syncMemberEffects(M, gn, groupFx[gn], groupSig[gn]); } catch (eMember) {}
+        }
+        for (var key in cache) {
+            if (cache.hasOwnProperty(key) && !seen[key]) delete cache[key];
         }
     }
 
@@ -947,12 +1063,19 @@
         } catch (eAll) {}
     }
 
+    function visibilityTick() {
+        // A ScriptUI panel's scheduled task is a plain callback. If anything
+        // throws here, the whole repeat can stop, leaving stale effect copies
+        // and stale group visibility behind. Keep the timer alive.
+        try { syncGroupVisibility(); } catch (eTick) {}
+    }
+
     function startVisibilityPoll() {
         try {
             if ($.global.ecgVisibilityTask) {
                 try { app.cancelTask($.global.ecgVisibilityTask); } catch (eC) {}
             }
-            $.global.ecgVisibilitySync = syncGroupVisibility;
+            $.global.ecgVisibilitySync = visibilityTick;
             $.global.ecgVisibilityTask = app.scheduleTask("ecgVisibilitySync()", 250, true);
         } catch (ePoll) {}
     }
@@ -1129,14 +1252,17 @@
         }
     }
 
-    // New groups are named "#N" (plus an optional user label). "Group: N" is
-    // still accepted so projects created with Egroup 1.0.x keep working.
-    function groupNameFromInput(raw, n) {
+    // New groups default to "#1", "#2", ... (number stored in the ECG:
+    // comment). If the user edits the suggested name, the visible name is
+    // just "#" plus the optional label. A zero-width tag keeps names unique.
+    function groupNameFromInput(raw, n, prompted) {
         var s = String(raw === undefined || raw === null ? "" : raw).replace(/^\s+|\s+$/g, "");
-        if (s && /^(?:Group:\s*\d+|#\s*\d+)/.test(s)) {
-            s = s.replace(/^(?:Group:\s*\d+|#\s*\d+)\s*\|?\s*/, "");
-        }
-        return "#" + n + (s ? " | " + s : "");
+        var def = groupDefaultName(n);
+        if (!prompted || s === def) return groupNameTag(n);
+        s = s.replace(/^Group:\s*\d+\s*\|?\s*/, "");
+        s = s.replace(/^#\s*\d*\s*\|?\s*/, "");
+        s = s.replace(/^\|\s*/, "");
+        return "#" + groupTag(n) + (s ? " | " + s : "");
     }
 
     function promptGroupName(n) {
@@ -1145,7 +1271,7 @@
         w.alignChildren = ["left", "top"];
         w.margins = 16;
         w.add("statictext", undefined, T("groupHint"));
-        var edit = w.add("edittext", undefined, "#" + n);
+        var edit = w.add("edittext", undefined, groupDefaultName(n));
         edit.characters = 32;
         var row = w.add("group");
         row.alignment = ["right", "top"];
@@ -1157,7 +1283,7 @@
         w.center();
         w.show();
         if (!accepted) return null;
-        return groupNameFromInput(edit.text, n);
+        return groupNameFromInput(edit.text, n, true);
     }
 
     function makeGroup() {
@@ -1172,7 +1298,7 @@
         members.sort(function (a, b) { return a.index - b.index; });
         var top = members[0];
         var n = nextNo(c);
-        var groupName = "#" + n;
+        var groupName = groupNameTag(n);
         if (askGroupName) {
             var prompted = promptGroupName(n);
             if (prompted === null) return;
